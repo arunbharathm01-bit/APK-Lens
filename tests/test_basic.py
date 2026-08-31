@@ -10,7 +10,15 @@ from zipfile import ZipFile
 
 import pytest
 
-from apklens.apk import APKPathError, calculate_sha256, validate_apk_path
+from apklens.apk import (
+    APKParseError,
+    APKPathError,
+    calculate_sha256,
+    open_apk_archive,
+    validate_apk_path,
+)
+from apklens.cli import main
+from apklens.dex import extract_dex_info
 from apklens.manifest import (
     classify_permission,
     extract_application_info,
@@ -35,6 +43,14 @@ def test_validate_apk_path_rejects_missing_paths_and_directories(tmp_path: Path)
         validate_apk_path(tmp_path / "missing.apk")
     with pytest.raises(APKPathError, match="not a file"):
         validate_apk_path(tmp_path)
+
+
+def test_open_apk_archive_rejects_non_zip_files(tmp_path: Path) -> None:
+    apk_path = tmp_path / "not-an-apk.apk"
+    apk_path.write_bytes(b"not a ZIP archive")
+
+    with pytest.raises(APKParseError, match="Invalid or corrupt APK archive"):
+        open_apk_archive(apk_path)
 
 
 def test_default_models_are_json_serializable() -> None:
@@ -75,6 +91,18 @@ def test_native_library_detection_uses_apk_member_paths(tmp_path: Path) -> None:
     ]
     assert native_library_from_path("lib/x86/libthing.so", 3) is not None
     assert native_library_from_path("lib/x86/nested/libthing.so", 3) is None
+
+
+def test_dex_info_counts_only_top_level_conventional_dex_files(tmp_path: Path) -> None:
+    apk_path = tmp_path / "dex.apk"
+    with ZipFile(apk_path, "w") as archive:
+        archive.writestr("classes.dex", b"a" * 7)
+        archive.writestr("classes2.dex", b"b" * 11)
+        archive.writestr("assets/classes3.dex", b"c" * 13)
+        archive.writestr("other.dex", b"d" * 17)
+
+    dex = extract_dex_info(apk_path)
+    assert (dex.file_count, dex.total_size_bytes, dex.class_count) == (2, 18, None)
 
 
 @pytest.mark.parametrize(
@@ -158,3 +186,25 @@ def test_manifest_handles_explicit_and_inferred_exported_states() -> None:
     assert result.services[0].exported is False
     assert result.providers[0].exported is False
     assert result.providers[0].exported_source == "inferred_provider_default"
+
+
+def test_cli_json_errors_leave_stdout_machine_readable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    missing_path = tmp_path / "missing.apk"
+
+    assert main([str(missing_path), "--json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"Error: APK file not found: {missing_path}\n"
+
+
+def test_cli_reports_malformed_apks_without_parser_log_noise(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    apk_path = tmp_path / "empty.apk"
+    with ZipFile(apk_path, "w"):
+        pass
+
+    assert main([str(apk_path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"Error: Invalid Android APK: {apk_path}\n"

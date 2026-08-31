@@ -82,6 +82,19 @@ def load_apk_parser(path: str | Path) -> Any:
             "Androguard is required for manifest analysis. Install APKLens dependencies first."
         ) from error
 
+    # Androguard enables a verbose Loguru handler by default. Its diagnostics
+    # are useful while developing Androguard itself, but they obscure APKLens'
+    # user-facing error messages (and would be especially surprising in JSON
+    # mode). The parser's exceptions are normalized below instead.
+    try:
+        from loguru import logger
+
+        logger.disable("androguard")
+    except ImportError:
+        # Loguru is an Androguard dependency, but keeping this defensive makes
+        # the parser boundary robust to alternate parser installations.
+        pass
+
     try:
         parser = APK(str(path))
         is_valid = getattr(parser, "is_valid_APK", None)
