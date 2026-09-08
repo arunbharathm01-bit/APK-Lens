@@ -1,14 +1,22 @@
-"""Small, deterministic security checks for normalized analysis results."""
+"""Manifest-derived, evidence-backed security checks."""
 
 from __future__ import annotations
 
-from .models import AnalysisResult, ApplicationInfo, ManifestInfo, SecurityFinding
+from .models import (
+    AnalysisResult,
+    ApplicationInfo,
+    CleartextTrafficState,
+    Confidence,
+    ManifestInfo,
+    SecurityFinding,
+    Severity,
+)
 
 
 def analyze_security(
     application: ApplicationInfo, manifest: ManifestInfo
 ) -> list[SecurityFinding]:
-    """Run the intentionally limited v0.1 security checks.
+    """Run deterministic manifest checks.
 
     Findings are observations, not a complete vulnerability assessment. In
     particular, only components whose exported state can be determined to be
@@ -17,12 +25,21 @@ def analyze_security(
 
     findings = [
         SecurityFinding(
-            severity="LOW" if application.debuggable else "INFO",
+            id="APK-MANIFEST-001",
             title=f"Debuggable flag: {str(application.debuggable).lower()}",
-            reason=(
+            severity=Severity.LOW if application.debuggable else Severity.INFO,
+            confidence=Confidence.HIGH,
+            category="manifest",
+            description=(
                 "The application allows debugging in production builds."
                 if application.debuggable
                 else "The application is not marked as debuggable."
+            ),
+            evidence=f"android:debuggable={str(application.debuggable).lower()}",
+            remediation=(
+                "Disable android:debuggable for production builds."
+                if application.debuggable
+                else None
             ),
         )
     ]
@@ -31,14 +48,26 @@ def analyze_security(
         if component.exported is True and not component.permission:
             findings.append(
                 SecurityFinding(
-                    severity="MEDIUM",
+                    id="APK-MANIFEST-002",
                     title="Exported component without permission",
-                    reason=(
+                    severity=Severity.MEDIUM,
+                    confidence=Confidence.MEDIUM,
+                    category="manifest",
+                    description=(
                         "This component is exported and does not declare an explicit "
                         "protection permission."
                     ),
+                    evidence=(
+                        "android:exported=true"
+                        if component.exported_source == "explicit"
+                        else f"exported inferred from {component.exported_source}"
+                    ),
                     component_type=component_type,
                     component_name=component.name,
+                    remediation=(
+                        "Set android:exported=false when external access is unnecessary, "
+                        "or require an appropriate protection permission."
+                    ),
                 )
             )
 
@@ -60,16 +89,43 @@ def analyze_security(
             details.append("dataExtractionRules declared")
         findings.append(
             SecurityFinding(
-                severity="INFO",
+                id="APK-MANIFEST-003",
                 title="Backup configuration declared",
-                reason="; ".join(details),
+                severity=Severity.INFO,
+                confidence=Confidence.HIGH,
+                category="manifest",
+                description=(
+                    "The manifest declares backup-related configuration. This is an "
+                    "informational observation, not a vulnerability by itself."
+                ),
+                evidence="; ".join(details),
+                remediation="Review backup policy and ensure sensitive data is excluded.",
+            )
+        )
+    if application.cleartext_traffic is CleartextTrafficState.ENABLED:
+        findings.append(
+            SecurityFinding(
+                id="APK-NET-001",
+                title="Cleartext traffic allowed",
+                severity=Severity.MEDIUM,
+                confidence=Confidence.HIGH,
+                category="network",
+                description=(
+                    "The application explicitly permits non-TLS network connections. "
+                    "This does not prove that sensitive data is transmitted over HTTP."
+                ),
+                evidence="android:usesCleartextTraffic=true",
+                remediation=(
+                    "Disable cleartext traffic and use TLS for network communication "
+                    "unless a narrowly reviewed exception is required."
+                ),
             )
         )
     return findings
 
 
 def add_security_findings(result: AnalysisResult) -> AnalysisResult:
-    """Populate and return ``result`` with the v0.1 security observations."""
+    """Populate ``result`` with its manifest-derived security observations."""
 
     result.findings = analyze_security(result.application, result.manifest)
     return result

@@ -1,6 +1,6 @@
 """APKLens: lightweight static inspection for Android APK files."""
 
-__version__ = "0.1.0"
+from .version import __version__
 
 from .analyzer import APKAnalyzer
 from .models import AnalysisResult

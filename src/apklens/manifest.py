@@ -5,7 +5,15 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from .models import ApplicationInfo, ComponentInfo, ManifestInfo, PermissionInfo
+from .models import (
+    ApplicationInfo,
+    CleartextTrafficState,
+    ComponentInfo,
+    ManifestInfo,
+    PermissionInfo,
+    PermissionProtection,
+    PermissionScope,
+)
 
 ANDROID_NAMESPACE = "http://schemas.android.com/apk/res/android"
 ANDROID_ATTR = f"{{{ANDROID_NAMESPACE}}}"
@@ -44,6 +52,19 @@ def _as_bool(value: str | None) -> bool | None:
     if normalized in {"false", "0"}:
         return False
     return None
+
+
+def _cleartext_traffic_state(value: str | None) -> CleartextTrafficState:
+    """Normalize the manifest cleartext setting without inferring a default."""
+
+    if value is None:
+        return CleartextTrafficState.NOT_DECLARED
+    parsed = _as_bool(value)
+    if parsed is True:
+        return CleartextTrafficState.ENABLED
+    if parsed is False:
+        return CleartextTrafficState.DISABLED
+    return CleartextTrafficState.UNKNOWN
 
 
 def _tag_name(element: Any) -> str:
@@ -132,8 +153,12 @@ def extract_application_info(parser: Any) -> ApplicationInfo:
     )
 
     manifest = get_manifest_xml(parser)
-    app_element = _find_application(manifest) if manifest is not None else None
+    if manifest is None:
+        application.cleartext_traffic = CleartextTrafficState.UNKNOWN
+        return application
+    app_element = _find_application(manifest)
     if app_element is None:
+        application.cleartext_traffic = CleartextTrafficState.UNKNOWN
         return application
 
     application.debuggable = _as_bool(_attribute(app_element, "debuggable")) is True
@@ -141,6 +166,10 @@ def extract_application_info(parser: Any) -> ApplicationInfo:
     application.backup_agent = _attribute(app_element, "backupAgent")
     application.full_backup_content = _attribute(app_element, "fullBackupContent")
     application.data_extraction_rules = _attribute(app_element, "dataExtractionRules")
+    application.cleartext_traffic = _cleartext_traffic_state(
+        _attribute(app_element, "usesCleartextTraffic")
+    )
+    application.network_security_config = _attribute(app_element, "networkSecurityConfig")
     return application
 
 
@@ -225,7 +254,101 @@ def classify_permission(permission_name: str) -> str | None:
     return None
 
 
-def extract_permissions(parser: Any) -> list[PermissionInfo]:
+_DANGEROUS_PERMISSIONS = frozenset(
+    {
+        "CAMERA",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "READ_CONTACTS",
+        "WRITE_CONTACTS",
+        "GET_ACCOUNTS",
+        "READ_PHONE_STATE",
+        "READ_PHONE_NUMBERS",
+        "READ_CALL_LOG",
+        "WRITE_CALL_LOG",
+        "CALL_PHONE",
+        "RECORD_AUDIO",
+        "BODY_SENSORS",
+        "ACTIVITY_RECOGNITION",
+        "POST_NOTIFICATIONS",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+    }
+)
+_SPECIAL_PERMISSIONS = frozenset(
+    {
+        "MANAGE_EXTERNAL_STORAGE",
+        "REQUEST_INSTALL_PACKAGES",
+        "SYSTEM_ALERT_WINDOW",
+        "WRITE_SETTINGS",
+        "PACKAGE_USAGE_STATS",
+        "QUERY_ALL_PACKAGES",
+    }
+)
+_NORMAL_PERMISSIONS = frozenset(
+    {
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "CHANGE_NETWORK_STATE",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_STATE",
+        "VIBRATE",
+        "WAKE_LOCK",
+    }
+)
+
+
+def classify_permission_protection(permission_name: str) -> PermissionProtection:
+    """Classify only common, well-understood Android permission levels.
+
+    This deliberately small table avoids presenting an incomplete list as an
+    authoritative Android permission database. Unrecognised permissions remain
+    available in the result with an ``unknown`` protection level.
+    """
+
+    if not permission_name.startswith("android.permission."):
+        return PermissionProtection.UNKNOWN
+    short_name = permission_name.rsplit(".", maxsplit=1)[-1]
+    if short_name in _DANGEROUS_PERMISSIONS:
+        return PermissionProtection.DANGEROUS
+    if short_name in _SPECIAL_PERMISSIONS:
+        return PermissionProtection.SPECIAL
+    if short_name in _NORMAL_PERMISSIONS:
+        return PermissionProtection.NORMAL
+    return PermissionProtection.UNKNOWN
+
+
+def _declared_permission_names(parser: Any) -> set[str]:
+    """Return application-declared permissions across supported parser APIs."""
+
+    method = getattr(parser, "get_declared_permissions", None)
+    if not callable(method):
+        return set()
+    try:
+        declared = method() or []
+    except Exception:
+        return set()
+    if isinstance(declared, dict):
+        return {str(name) for name in declared}
+    return {str(name) for name in declared}
+
+
+def classify_permission_scope(
+    permission_name: str, declared_permissions: set[str], package_name: str | None
+) -> PermissionScope:
+    """Classify a requested permission without guessing its ownership."""
+
+    if permission_name.startswith("android.permission."):
+        return PermissionScope.ANDROID
+    if permission_name in declared_permissions:
+        return PermissionScope.APPLICATION
+    if package_name and permission_name.startswith(f"{package_name}."):
+        return PermissionScope.APPLICATION
+    return PermissionScope.UNKNOWN
+
+
+def extract_permissions(parser: Any, package_name: str | None = None) -> list[PermissionInfo]:
     """Extract and deterministically sort permissions requested by the APK."""
 
     method = getattr(parser, "get_permissions", None)
@@ -236,4 +359,13 @@ def extract_permissions(parser: Any) -> list[PermissionInfo]:
     except Exception:
         return []
     names = sorted({str(permission) for permission in permissions})
-    return [PermissionInfo(name=name, category=classify_permission(name)) for name in names]
+    declared_permissions = _declared_permission_names(parser)
+    return [
+        PermissionInfo(
+            name=name,
+            category=classify_permission(name),
+            scope=classify_permission_scope(name, declared_permissions, package_name),
+            protection_level=classify_permission_protection(name),
+        )
+        for name in names
+    ]

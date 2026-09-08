@@ -47,7 +47,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     reporter = JSONReporter(result) if arguments.json else TerminalReporter(result)
-    print(reporter.render())
+    try:
+        print(reporter.render())
+    except BrokenPipeError:
+        # A downstream command such as ``head`` may close stdout early. Closing
+        # the stream prevents interpreter shutdown from emitting a traceback.
+        try:
+            sys.stdout.close()
+        except BrokenPipeError:
+            pass
+        return 0
     return 0
 
 

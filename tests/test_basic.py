@@ -54,27 +54,18 @@ def test_open_apk_archive_rejects_non_zip_files(tmp_path: Path) -> None:
 
 
 def test_default_models_are_json_serializable() -> None:
-    rendered = JSONReporter(AnalysisResult()).render()
-    assert json.loads(rendered) == {
-        "apk": {"filename": "", "sha256": "", "size_bytes": 0},
-        "application": {
-            "allow_backup": None,
-            "backup_agent": None,
-            "data_extraction_rules": None,
-            "debuggable": False,
-            "full_backup_content": None,
-            "min_sdk": None,
-            "package_name": None,
-            "target_sdk": None,
-            "version_code": None,
-            "version_name": None,
-        },
-        "dex": {"class_count": None, "file_count": 0, "total_size_bytes": 0},
-        "findings": [],
-        "manifest": {"activities": [], "providers": [], "receivers": [], "services": []},
-        "native": {"libraries": []},
-        "permissions": [],
+    rendered = json.loads(JSONReporter(AnalysisResult()).render())
+    assert rendered["tool"] == {"name": "APKLens", "version": "0.2.0"}
+    assert rendered["apk"] == {"filename": "", "sha256": "", "size_bytes": 0}
+    assert rendered["network"] == {
+        "urls": [],
+        "domains": [],
+        "http_urls": [],
+        "https_urls": [],
     }
+    assert rendered["indicators"] == []
+    assert rendered["signing"] == {"certificates": [], "signature_schemes": []}
+    assert rendered["summary"]["risk_score"] == 0
 
 
 def test_native_library_detection_uses_apk_member_paths(tmp_path: Path) -> None:
